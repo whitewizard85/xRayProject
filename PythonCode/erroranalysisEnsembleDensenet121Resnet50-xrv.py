@@ -1,0 +1,242 @@
+import os
+import json
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+import pandas as pd
+import numpy as np
+from torchvision import transforms
+from torch.utils.data import Dataset, DataLoader
+from PIL import Image
+from tqdm import tqdm
+import torchxrayvision as xrv
+
+# =====================================================
+# CONFIGURAZIONE PATHS
+# =====================================================
+root_dir = "/home/gpuvm/Desktop/Luca Migliaccio/archive"
+test_csv = "/home/gpuvm/Desktop/Luca Migliaccio/PythonCode/test_split.csv"
+
+model_path_v4 = "checkpoints/best_densenet121_v4_xrv.pth"
+model_path_v5 = "checkpoints/best_resnet50_v5_xrv.pth"
+
+thresholds_path_v4 = "checkpoints/optimized_thresholds_v4_xrv.json"
+thresholds_path_v5 = "checkpoints/optimized_thresholds_v5_xrv.json"
+
+IMAGE_SIZE = 512
+
+classes = [
+    "Atelectasis", "Cardiomegaly", "Effusion", "Infiltration",
+    "Mass", "Nodule", "Pneumonia", "Pneumothorax",
+    "Consolidation", "Edema", "Emphysema", "Fibrosis",
+    "Pleural_Thickening", "Hernia"
+]
+num_classes = len(classes)
+
+# =====================================================
+# UTILS & DATASET (Blindato contro i leak di PIL Image)
+# =====================================================
+def encode_labels(label_str):
+    vec = torch.zeros(num_classes)
+    labels = str(label_str).split("|")
+    for l in labels:
+        if l in classes:
+            vec[classes.index(l)] = 1.0
+    return vec
+
+def get_image_path(img_name):
+    for i in range(1, 13):
+        folder = f"images_{i:03d}"
+        path = os.path.join(root_dir, folder, "images", img_name)
+        if os.path.exists(path):
+            return path
+    return None
+
+class NIHChestDatasetXRV(Dataset):
+    def __init__(self, dataframe, transform=None):
+        self.df = dataframe.reset_index(drop=True)
+        self.transform = transform
+        self.fallback_to_tensor = transforms.ToTensor()
+
+    def __len__(self):
+        return len(self.df)
+
+    def __getitem__(self, idx):
+        row = self.df.iloc[idx]
+        img_name = row["Image Index"]
+        label_str = row["Finding Labels"]
+
+        img_path = get_image_path(img_name)
+        if img_path is None:
+            return None, None, None
+
+        try:
+            image = Image.open(img_path).convert("L")
+            
+            # Normalizzazione custom richiesta dai pesi XRV
+            img_np = np.array(image)
+            img_np = xrv.datasets.normalize(img_np, maxval=255)
+            image = Image.fromarray(img_np)
+
+            label = encode_labels(label_str)
+
+            if self.transform:
+                image = self.transform(image)
+            
+            # Controllo di sicurezza: se non è un Tensor, forziamo la conversione
+            if not isinstance(image, torch.Tensor):
+                image = self.fallback_to_tensor(image)
+
+            return image, label, img_name
+            
+        except Exception:
+            return None, None, None
+
+def collate_fn(batch):
+    # 1. Filtra via tutti i potenziali elementi None generati da errori di caricamento
+    batch = [b for b in batch if b is not None and b[0] is not None and b[1] is not None]
+    if len(batch) == 0: 
+        return torch.empty(0), torch.empty(0), []
+    
+    cleaned_images = []
+    for b in batch:
+        img = b[0]
+        # 2. Ulteriore scudo protettivo prima dello stacking
+        if not isinstance(img, torch.Tensor):
+            img = transforms.ToTensor()(img)
+        cleaned_images.append(img)
+        
+    images = torch.stack(cleaned_images)
+    labels = torch.stack([b[1] for b in batch])
+    img_names = [b[2] for b in batch]
+    return images, labels, img_names
+
+# =====================================================
+# LOAD SOGLIE FUSE
+# =====================================================
+with open(thresholds_path_v4, "r") as f: t_v4 = json.load(f)
+with open(thresholds_path_v5, "r") as f: t_v5 = json.load(f)
+
+ensemble_thresholds = {c: float((t_v4[c] + t_v5[c]) / 2.0) for c in classes}
+print("Soglie ottimizzate dell'Ensemble caricate ed elaborate con successo! ✔")
+
+# =====================================================
+# ARCHITETTURE & CARICAMENTO MODELLI
+# =====================================================
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+# Modello V4 (DenseNet121)
+base_densenet = xrv.models.DenseNet(weights="densenet121-res224-all")
+class XRVFeatureExtractor(nn.Module):
+    def __init__(self, xrv_model, num_classes):
+        super(XRVFeatureExtractor, self).__init__()
+        self.features = xrv_model.features           
+        self.classifier = nn.Linear(1024, num_classes) 
+    def forward(self, x):
+        out = F.relu(self.features(x), inplace=True)
+        out = F.adaptive_avg_pool2d(out, (1, 1))
+        return self.classifier(torch.flatten(out, 1))
+
+model_v4 = XRVFeatureExtractor(base_densenet, num_classes).to(device)
+model_v4.load_state_dict(torch.load(model_path_v4, map_location=device))
+model_v4.eval()
+
+# Modello V5 (ResNet50)
+base_resnet = xrv.models.ResNet(weights="resnet50-res512-all")
+class XRVResNetFeatureExtractor(nn.Module):
+    def __init__(self, xrv_resnet, num_classes):
+        super(XRVResNetFeatureExtractor, self).__init__()
+        self.base_resnet = xrv_resnet
+        self.classifier = nn.Linear(2048, num_classes)
+    def forward(self, x):
+        return self.classifier(self.base_resnet.features(x))
+
+model_v5 = XRVResNetFeatureExtractor(base_resnet, num_classes).to(device)
+model_v5.load_state_dict(torch.load(model_path_v5, map_location=device))
+model_v5.eval()
+
+print("\nEntrambi i modelli sono pronti in memoria per l'Error Analysis dell'Ensemble! ✔")
+
+# =====================================================
+# INFERENCE E FILTRAGGIO ERRORI
+# =====================================================
+test_transform = transforms.Compose([
+    transforms.Resize((IMAGE_SIZE, IMAGE_SIZE)),
+    transforms.ToTensor()
+])
+
+test_df = pd.read_csv(test_csv)
+test_loader = DataLoader(
+    NIHChestDatasetXRV(test_df, test_transform), 
+    batch_size=16, shuffle=False, num_workers=4, pin_memory=True, collate_fn=collate_fn
+)
+
+error_records = []
+print("\nAnalisi e tracciamento degli errori sul Test Set dell'Ensemble...")
+
+with torch.no_grad():
+    for images, labels, names in tqdm(test_loader, desc="Analyzing Ensemble Errors"):
+        if images.numel() == 0: continue
+        images = images.to(device)
+        
+        with torch.cuda.amp.autocast():
+            out_v4 = model_v4(images)
+            out_v5 = model_v5(images)
+            
+        probs_v4 = torch.sigmoid(out_v4).cpu().numpy()
+        probs_v5 = torch.sigmoid(out_v5).cpu().numpy()
+        
+        # Late Fusion: Media matematica esatta delle probabilità predette
+        probs_ensemble = (probs_v4 + probs_v5) / 2.0
+        targets = labels.numpy()
+        
+        for idx, img_name in enumerate(names):
+            for j, c in enumerate(classes):
+                prob = float(probs_ensemble[idx, j])
+                target = int(targets[idx, j])
+                thresh = ensemble_thresholds[c]
+                pred = 1 if prob >= thresh else 0
+                
+                if pred != target:
+                    err_type = "FN" if target == 1 else "FP"
+                    err_margin = float(thresh - prob) if err_type == "FN" else float(prob - thresh)
+                    
+                    error_records.append({
+                        "Image_Index": img_name,
+                        "Class": c,
+                        "Type": err_type,
+                        "Probability": prob,
+                        "Threshold": thresh,
+                        "Target": target,
+                        "Error_Margin": err_margin
+                    })
+
+df_errors = pd.DataFrame(error_records)
+os.makedirs("checkpoints", exist_ok=True)
+csv_save_path = "checkpoints/error_analysis_ensemble.csv"
+df_errors.to_csv(csv_save_path, index=False)
+
+print(f"\nAnalisi completata! Trovati {len(df_errors)} errori totali multiclasse dell'Ensemble.")
+print(f"I dati grezzi sono stati salvati in: {csv_save_path} ✔")
+
+# =====================================================
+# ESTRAZIONE REPORT CRITICO TOP 5 FN / TOP 5 FP
+# =====================================================
+df_fn = df_errors[df_errors["Type"] == "FN"].sort_values(by="Error_Margin", ascending=False).head(5)
+df_fp = df_errors[df_errors["Type"] == "FP"].sort_values(by="Error_Margin", ascending=False).head(5)
+
+print("\n" + "="*70)
+print("--- TOP 5 PEGGIORI FALSI NEGATIVI DELL'ENSEMBLE (Mancati) ---")
+print("="*70)
+if not df_fn.empty:
+    print(df_fn.to_string(index=False))
+else:
+    print("Nessun falso negativo trovato.")
+
+print("\n" + "="*70)
+print("--- TOP 5 PEGGIORI FALSI POSITIVI DELL'ENSEMBLE (Falsi Allarmi) ---")
+print("="*70)
+if not df_fp.empty:
+    print(df_fp.to_string(index=False))
+else:
+    print("Nessun falso positivo trovato.")

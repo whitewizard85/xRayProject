@@ -1,0 +1,60 @@
+# === Dataset (pesanti, non versionare) ===
+/archive/
+/archiveCheXpert/
+
+# === Virtual environment Python ===
+/xrv_env/
+
+# === Checkpoint / pesi dei modelli ===
+/checkpoints/
+/PythonCode/checkpoints/
+/best_densenet121/
+
+# === Output di analisi / figure generate ===
+/Analisi_Calibrazione_Tesi/
+/Analisi_Dettagliata_30_Immagini/
+/Analisi_Tesi_Finale/
+/Analisi_Tesi_Robustezza/
+/AnalysisSwinV2/
+/ConvNeXt-Grad-Cam/
+/ConvNeXt-Grad-Cam-Debiased/
+/ConvNeXt-Grad-Cam-Thesis-Clean/
+/ConvNeXt-Thesis-1000Samples-Complete/
+/ConvNeXt-Thesis-100Samples-Complete/
+/ConvNeXt-Thesis-Top1-Complete/
+/error_analysis_results/
+/plots/
+/Thesis_Visual_Report/
+
+# === Log di risultati (non codice) ===
+PythonCode/evaluation_*.txt
+out.txt
+*.log
+
+# === Pesi / checkpoint dei modelli ===
+*.pth
+*.pt
+
+# === Immagini generate (plot, Grad-CAM, distribuzioni) ===
+*.png
+*.jpg
+*.jpeg
+
+# === Risultati di analisi errori (csv/json) ===
+error_analysis*
+
+# === CSV: escludi i risultati generati, ma tieni gli split (riproducibilita') ===
+*.csv
+!train_split.csv
+!val_split.csv
+!test_split.csv
+
+# === Python standard ===
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
+*.egg-info/
+
+# === OS / editor ===
+.DS_Store
+.vscode/

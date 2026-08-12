@@ -1,0 +1,17 @@
+{
+    "Atelectasis": 0.15000000000000002,
+    "Cardiomegaly": 0.15000000000000002,
+    "Effusion": 0.25,
+    "Infiltration": 0.25,
+    "Mass": 0.15000000000000002,
+    "Nodule": 0.1,
+    "Pneumonia": 0.05,
+    "Pneumothorax": 0.2,
+    "Consolidation": 0.1,
+    "Edema": 0.1,
+    "Emphysema": 0.15000000000000002,
+    "Fibrosis": 0.05,
+    "Pleural_Thickening": 0.1,
+    "Hernia": 0.05,
+    "No Finding": 0.45
+}
