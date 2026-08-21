@@ -1,0 +1,15 @@
+Pathology,ECE
+Hernia,0.0006
+Cardiomegaly,0.0029
+Emphysema,0.0037
+Pneumonia,0.0041
+Fibrosis,0.006
+Mass,0.0061
+Edema,0.0068
+Consolidation,0.0079
+Pleural_Thickening,0.0089
+Atelectasis,0.0118
+Effusion,0.0158
+Pneumothorax,0.0163
+Nodule,0.0169
+Infiltration,0.0402

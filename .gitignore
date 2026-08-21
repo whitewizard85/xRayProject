@@ -58,3 +58,10 @@ __pycache__/
 # === OS / editor ===
 .DS_Store
 .vscode/
+
+# === Eccezione: tieni tutti i CSV di riproducibilità del paper ===
+!paper_reproducibility/**/*.csv
+
+# === Eccezione: tieni le immagini di controllo qualità del paper (scoperta del bug maschera) ===
+!paper_reproducibility/results/figures/*.png
+!paper_reproducibility/results/qc/**/*.png

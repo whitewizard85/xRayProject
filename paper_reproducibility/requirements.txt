@@ -1,0 +1,12 @@
+torch==2.12.0+cu130
+torchvision==0.27.0+cu130
+timm==1.0.27
+scikit-learn==1.8.0
+scipy==1.17.1
+pandas==3.0.3
+numpy==2.4.6
+Name: scikit-image
+Version: 0.26.0
+Python 3.12.3
+Name: grad-cam
+Version: 1.5.5
