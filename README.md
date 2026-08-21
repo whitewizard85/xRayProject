@@ -2,33 +2,91 @@
 
 ## Descrizione
 
-Progetto di classificazione automatica di radiografie del torace (chest X-ray) tramite
-modelli di deep learning, sviluppato nell'ambito della tesi di Luca Migliaccio, e
-successivamente esteso in un audit metodologico multi-condizione (localizzazione,
-calibrazione, robustezza) confluito nel paper *"Beyond a Single Comparison: A
-Multi-Condition Audit of Attribution Localization, Calibration, and Robustness in
-Multi-Label Chest X-Ray Classification"* (sottomesso a Computerized Medical Imaging
-and Graphics).
+Progetto di classificazione multi-label di radiografie del torace (chest X-ray) tramite
+deep learning, sviluppato nell'ambito della tesi di Luca Migliaccio, e successivamente
+esteso in un audit metodologico multi-condizione (localizzazione, calibrazione,
+robustezza) confluito nel paper *"Beyond a Single Comparison: A Multi-Condition Audit
+of Attribution Localization, Calibration, and Robustness in Multi-Label Chest X-Ray
+Classification"* (sottomesso a Computerized Medical Imaging and Graphics).
 
-Il lavoro include addestramento e confronto di più architetture, tecniche di
-interpretabilità (Grad-CAM, Eigen-CAM), calibrazione delle probabilità, analisi di
-robustezza e analisi degli errori.
+Confronta più architetture (CNN e Vision Transformer) sul dataset NIH ChestX-ray14,
+con una pipeline sperimentale completa: preparazione dati, training (baseline e
+"avanzato"), ottimizzazione delle soglie, calibrazione delle probabilità,
+interpretabilità (Grad-CAM/Eigen-CAM), test di robustezza e analisi degli errori,
+anche in configurazione ensemble.
 
-**Dataset utilizzati (non inclusi nel repository — vedi sotto):**
-- CheXpert
-- NIH ChestX-ray14 ("ChestXray14" / `archive/`), incluso il sottoinsieme ufficiale di
-  984 bounding box patologiche (`BBox_List_2017.csv`)
+## Dataset
 
-**Architetture coinvolte:**
-- DenseNet121, DenseNet169
-- ResNet50
-- EfficientNet B0 / B3 / B7
-- ConvNeXt
-- SwinV2
-- DINOv2, Rad-DINO
-- Modelli ensemble (combinazioni delle precedenti)
-- Alcuni modelli pre-addestrati su dataset biomedicali (XRV / weights biomedicali,
-  via `torchxrayvision`)
+- **NIH ChestX-ray14** (`archive/`) — dataset principale. CSV `Data_Entry_2017.csv` con
+  colonne `Image Index` e `Finding Labels` (etichette multiple separate da `|`).
+  14 patologie classificate come multi-label (`Atelectasis`, `Cardiomegaly`, `Effusion`,
+  `Infiltration`, `Mass`, `Nodule`, `Pneumonia`, `Pneumothorax`, `Consolidation`, `Edema`,
+  `Emphysema`, `Fibrosis`, `Pleural_Thickening`, `Hernia`). In alcuni script è presente
+  anche una 15ª classe `No Finding` (paziente sano) trattata come categoria a sé. Include
+  inoltre il sottoinsieme ufficiale di 984 bounding box patologiche
+  (`BBox_List_2017.csv`), usato per la validazione di localizzazione contro ground truth
+  reale nel paper CMIG.
+- **CheXpert** (`archiveCheXpert/`) — usato per il pre-training di alcuni backbone
+  (es. ConvNeXt, EfficientNet-B7) e per script di valutazione dedicati
+  (`evalConvNeXtCheXpert.py`).
+- Pesi biomedicali esterni: un ConvNeXt-tiny pre-addestrato su CheXpert scaricato da
+  Hugging Face (`nicolas-metral/convnext-tiny-chexpert`, via `timm`), e pesi
+  **torchxrayvision (XRV)** per DenseNet121/ResNet50 (script con suffisso `-xrv`), che
+  richiedono un preprocessing specifico (immagine in scala di grigi, normalizzazione XRV).
+
+## Pipeline / metodologia (verificata nel codice)
+
+1. **Pulizia dati** (`cleaning.py`) — verifica esistenza e integrità di ogni immagine
+   (apertura + `img.verify()`), raccoglie statistiche su dimensioni e modalità colore.
+2. **Split paziente-level** (`split.py`, `DataLeakage.py`) — split 70/15/15
+   (train/val/test) fatto per **PatientID** (estratto dal nome file, non per singola
+   immagine), seed fisso `42`, per evitare che immagini dello stesso paziente finiscano
+   in split diversi. `DataLeakage.py` verifica l'assenza di overlap tra i tre set.
+3. **Training**:
+   - Versioni **baseline** (es. `trainDensenet121.py`): 5 epoche, `BCEWithLogitsLoss`
+     senza pesi, ottimizzatore Adam, nessun bilanciamento delle classi.
+   - Versioni **"Advanced"** (es. `trainAdvancedDensenet121.py`): fino a 20 epoche,
+     `BCEWithLogitsLoss` con `pos_weight` per classe (per compensare lo sbilanciamento
+     tra patologie rare e frequenti), AdamW con weight decay, mixed precision (AMP),
+     gradient clipping, early stopping (pazienza 5).
+   - Versioni **"Debiasing"** (es. `trainConvNeXt-Debiasing.py`): aggiungono un
+     `CenterCrop` dopo il resize, per ridurre l'effetto di bias legati ai bordi/marker
+     dell'immagine radiografica piuttosto che al contenuto clinico. Nell'ablation del
+     paper CMIG, questa modifica è stata isolata dagli altri cambi (loss, schedule,
+     augmentation) per verificarne l'effetto reale — vedi sezione dedicata più sotto.
+   - Modelli Transformer (SwinV2, Rad-DINO) caricati via `transformers`/moduli dedicati,
+     con batch size ridotto e gradient accumulation (batch effettivo maggiore), backbone
+     congelato per le prime epoche, poi fine-tuning con scheduler coseno.
+4. **Valutazione** (`eval*.py`) — inferenza sul test set, ROC-AUC per classe e media,
+   `classification_report` a soglia fissa 0.5.
+5. **Ottimizzazione soglie** (`threshold*.py`) — per ciascuna classe, grid search della
+   soglia (0.05–0.95, step 0.05) che massimizza l'F1-score sul validation set (nella
+   pipeline ConvNeXt del paper CMIG, invece, le soglie sono calcolate con l'indice di
+   Youden — vedi `evalConvNeXt.py`/`evalConvNeXt-Debiasing.py`); soglie salvate nei file
+   `optimized_thresholds*.json`.
+6. **Calibrazione** (`calibration*.py`) — reliability diagram per classe
+   (`sklearn.calibration.calibration_curve`) ed Expected Calibration Error (ECE).
+7. **Interpretabilità** (`grad-cam*.py`, `eigen-cam*.py`, altri script in
+   `PythonCode/`) — Grad-CAM/Eigen-CAM (libreria `pytorch_grad_cam`) su una classe
+   target, con generazione bilanciata di esempi Veri Positivi/Negativi e Falsi
+   Positivi/Negativi (10 per categoria) per l'analisi qualitativa in tesi.
+8. **Robustezza** (`robustness*.py`) — stress test applicando rumore gaussiano e blur
+   alle immagini di test, misura dell'entropia (media delle entropie binarie per classe,
+   non entropia multiclasse) delle predizioni come proxy dell'incertezza del modello
+   sotto perturbazione.
+9. **Analisi errori ed ensemble** (`erroranalysis*.py`) — analisi dei casi mal
+   classificati per singolo modello e in configurazione ensemble (es. DenseNet121 +
+   ResNet50 con pesi XRV, ciascuno con soglia ottimizzata individualmente); alcuni script
+   esplorano anche combinazioni pesate ottimizzate con Optuna o un meta-modello Random
+   Forest sopra le predizioni dei singoli modelli.
+
+## Architetture coperte
+
+DenseNet121, DenseNet169, ResNet50, EfficientNet B0/B3/B7, ConvNeXt (base, via `timm`,
+pre-addestrato ImageNet-22k, incluse varianti "Debiasing"), SwinV2 (via `transformers`,
+incluse varianti radiology-pretrained), DINOv2, Rad-DINO, oltre a diverse combinazioni
+ensemble delle precedenti. Alcuni modelli sono pre-addestrati su dataset biomedicali
+(XRV / weights biomedicali, via `torchxrayvision`).
 
 ## Struttura del progetto
 
@@ -60,15 +118,31 @@ Mappa indicativa per categoria funzionale:
 | Categoria | Prefisso file | Esempi |
 |---|---|---|
 | Preparazione/esplorazione dati | vario | `dataset.py`, `datasetXRV.py`, `preprocessing.py`, `cleaning.py`, `split.py`, `DataLeakage.py`, `EsplorazioneCheXpert.py`, `PercentualiPatologie.py`, `CaricamentoPesiBiomedicali.py` |
-| Training | `train*.py` | `trainDensenet121.py`, `trainConvNeXt.py`, `trainConvNeXt-Debiasing.py`, `trainSwinV2-ChestXRay.py`, ... |
+| Training | `train*.py` | `trainDensenet121.py`, `trainAdvancedDensenet121.py`, `trainConvNeXt.py`, `trainConvNeXt-Debiasing.py`, `trainSwinV2-ChestXRay.py`, `trainRad-Dino.py`, ... |
 | Valutazione | `eval*.py` | `evalDensenet121.py`, `evalConvNeXt.py`, `evalConvNeXt-Debiasing.py`, `evalEnsembleConvNeXtSwinV2.py`, ... |
 | Ottimizzazione soglie | `threshold*.py` | `thresholdResnet50.py`, `thresholdAdvancedDensenet121(2).py`, ... |
-| Analisi errori | `erroranalysis*.py` | `erroranalysisDensenet121(2).py`, `erroranalysisEnsembleDensenet121Resnet50-xrv.py`, ... |
+| Analisi errori / ensemble | `erroranalysis*.py` | `erroranalysisDensenet121(2).py`, `erroranalysisEnsembleDensenet121Resnet50-xrv.py`, `erroranalysisEnsembleOptunaDensenet121Resnet50-xrv.py`, ... |
 | Calibrazione | `calibration*.py` | `calibrationConvNeXt.py`, `calibrationConvNeXt-Debiasing.py`, `calibration-robustnessConvNeXt-Debiasing.py` |
 | Interpretabilità | `grad-cam*.py`, `eigen-cam*.py` | `grad-camConvNeXt.py`, `grad-camConvNeXt-DebiasingFinale.py`, `eigen-camSwinV2.py`, `ActivationMaximationConvNeXt.py`, `DifferenceMapConvNeXt.py`, `GuidedActivationConvNeXt.py` |
 | Robustezza | `robustness*.py` | `robustnessConvNeXt.py`, `robustnessConvNeXtDebiasing2.py` |
 | Grafici riassuntivi | vario | `GenerazioneGraficoRobustezza.py`, `GenerazioneIstogrammi.py` |
-| Script esplorativi/prove | `prova*.py` | `prova.py`, `prova1.py`, `provaEnsemble.py`, `analysisSwinV2.py` |
+| Script esplorativi/prove | `prova*.py` | `prova.py` (vuoto), `prova1.py`, `provaEnsemble.py`, `analysisSwinV2.py` |
+
+## ⚠️ Percorsi hardcoded
+
+Molti script contengono percorsi assoluti scritti direttamente nel codice, del tipo:
+```python
+root_dir = "/home/gpuvm/Desktop/Luca Migliaccio/archive"
+train_csv = "/home/gpuvm/Desktop/Luca Migliaccio/PythonCode/train_split.csv"
+```
+Per eseguire gli script su un'altra macchina (o dopo aver clonato il repo altrove),
+questi percorsi vanno aggiornati manualmente — non sono relativi al repository.
+Alcuni script più recenti (tutti quelli in `paper_reproducibility/`, vedi sotto) usano
+lo stesso pattern ma con le variabili di configurazione raccolte in cima al file,
+rendendo l'aggiornamento più semplice; nessuno script del progetto usa ancora
+`BASE_DIR = os.path.dirname(os.path.abspath(__file__))` in modo sistematico — verifica
+sempre le variabili di percorso prima di lanciare uno script su una macchina diversa da
+quella originale.
 
 ## Dati e file esclusi dal repository
 
@@ -77,6 +151,11 @@ Questo repository contiene **solo il codice**. Sono esclusi (vedi `.gitignore`):
 - Il virtual environment Python (`xrv_env/`)
 - Checkpoint / pesi dei modelli addestrati
 - Output di analisi generati (grafici, immagini Grad-CAM, report)
+
+Sono invece **inclusi** (per riproducibilità): `train_split.csv`, `val_split.csv`,
+`test_split.csv` (split esatto usato negli esperimenti) e i file
+`optimized_thresholds*.json` (soglie per classe usate nelle fasi successive alla
+valutazione).
 
 Scarica il dataset NIH ChestX-ray14 separatamente e posizionalo sotto `archive/`
 rispettando la struttura a cartelle `images_001/` .. `images_012/` attesa da tutti gli
@@ -106,8 +185,13 @@ source venv/bin/activate
 pip install -r requirements.txt
 ```
 
-Se `requirements.txt` non è ancora presente nella cartella, generalo dalla macchina
-con l'ambiente `xrv_env` attivo:
+> **Nota**: `requirements.txt` include alcune dipendenze CUDA/NVIDIA specifiche
+> dell'ambiente originale (GPU e driver della VM su cui è stato sviluppato il progetto).
+> Su una macchina con GPU/driver diversi, o senza GPU, potrebbe essere necessario
+> adattare le versioni di `torch` e dei pacchetti `nvidia-*`.
+
+Se `requirements.txt` non è ancora presente/aggiornato nella cartella, rigeneralo dalla
+macchina con l'ambiente `xrv_env` attivo:
 
 ```bash
 source xrv_env/bin/activate
@@ -120,21 +204,26 @@ così chiunque cloni il repo può ricreare l'ambiente senza il venv originale.
 
 Tutti gli script di `PythonCode/` seguono lo stesso pattern: **configurazione tramite
 variabili in cima al file** (path del dataset, dei checkpoint, iperparametri), non
-tramite argomenti da riga di comando. Prima di lanciare uno script, aprilo e verifica/
-aggiorna le variabili di percorso in testa al file (tipicamente `ROOT_DIR`,
-`CHECKPOINT_DIR`, `TRAIN_CSV`/`VAL_CSV`/`TEST_CSV`), poi eseguilo direttamente:
+tramite argomenti da riga di comando (vedi anche "⚠️ Percorsi hardcoded" sopra). Prima
+di lanciare uno script, aprilo e verifica/aggiorna le variabili di percorso in testa al
+file (tipicamente `ROOT_DIR`, `CHECKPOINT_DIR`, `TRAIN_CSV`/`VAL_CSV`/`TEST_CSV`), poi
+eseguilo direttamente:
 
 ```bash
 cd PythonCode
 python <nome_script>.py
 ```
 
-Ordine tipico di utilizzo, per fase:
+L'ordine seguente è dedotto dalla logica della pipeline e dal codice dei singoli
+script; non è stato verificato con un run end-to-end completo di tutte le
+combinazioni architettura/variante, quindi in caso di errore controlla prima le
+variabili di configurazione in cima allo script che stai lanciando.
 
 **1. Preparazione dati** (una tantum, prima di tutto il resto)
 ```bash
+python cleaning.py           # valida integrità e formato del dataset scaricato
 python split.py              # genera train_split.csv / val_split.csv / test_split.csv
-                              # a livello paziente (70/15/15, seed fisso)
+                              # a livello paziente (70/15/15, seed 42)
 python DataLeakage.py        # verifica assenza di overlap paziente fra gli split
 python PercentualiPatologie.py   # statistiche di distribuzione delle classi
 python EsplorazioneCheXpert.py   # esplorazione dataset CheXpert, se usato
@@ -145,26 +234,29 @@ python CaricamentoPesiBiomedicali.py   # scarica/verifica i pesi pre-addestrati 
 `checkpoints/`)
 ```bash
 python trainConvNeXt.py              # ConvNeXt, configurazione pre-intervento
-python trainConvNeXt-Debiasing.py    # ConvNeXt, configurazione post-intervento
-python trainDensenet121.py           # DenseNet-121
+python trainConvNeXt-Debiasing.py    # ConvNeXt, configurazione post-intervento (CenterCrop)
+python trainDensenet121.py           # DenseNet-121, versione baseline (5 epoche)
+python trainAdvancedDensenet121.py   # DenseNet-121, versione avanzata (pos_weight, AMP, early stopping)
 python trainSwinV2-ChestXRay.py      # SwinV2, pesi radiology-pretrained
+python trainRad-Dino.py              # Rad-DINO
 # ... e gli equivalenti train*.py per le altre architetture elencate sopra
 ```
 
-**3. Valutazione e ottimizzazione soglie**
+**3. Ottimizzazione soglie e valutazione**
 ```bash
+python thresholdResnet50.py            # grid search soglia F1-ottimale per singola architettura
+python thresholdAdvancedDensenet121\(2\).py
 python evalConvNeXt.py                 # metriche globali + soglie di Youden (pre-intervento)
 python evalConvNeXt-Debiasing.py       # idem, post-intervento
 python evalDensenet121.py
 python evalEnsembleConvNeXtSwinV2.py   # metriche dell'ensemble a inferenza
-python thresholdResnet50.py            # ottimizzazione soglie per singola architettura
-python thresholdAdvancedDensenet121\(2\).py
 ```
 
-**4. Analisi degli errori**
+**4. Analisi degli errori ed ensemble**
 ```bash
 python erroranalysisDensenet121\(2\).py
 python erroranalysisEnsembleDensenet121Resnet50-xrv.py
+python erroranalysisEnsembleOptunaDensenet121Resnet50-xrv.py   # combinazione pesata via Optuna
 ```
 
 **5. Interpretabilità (Grad-CAM / Eigen-CAM)**
@@ -197,10 +289,10 @@ python GenerazioneGraficoRobustezza.py
 python GenerazioneIstogrammi.py
 ```
 
-Gli script con prefisso `prova*.py` (`prova.py`, `prova1.py`, `provaEnsemble.py`,
+Gli script con prefisso `prova*.py` (`prova.py` — vuoto, `prova1.py`, `provaEnsemble.py`,
 `analysisSwinV2.py`) sono script esplorativi/di prova usati durante lo sviluppo, non
-parte della pipeline finale: consultali per riferimento ma non fanno parte del
-percorso di riproduzione standard.
+parte della pipeline finale: consultali per riferimento ma non fanno parte del percorso
+di riproduzione standard.
 
 ---
 
@@ -208,9 +300,11 @@ percorso di riproduzione standard.
 
 `paper_reproducibility/` contiene tutto il necessario per riprodurre il contributo
 metodologico centrale del paper: un ablation controllato a sette condizioni e tre
-seed dell'intervento motivato dall'explainability, validato sia contro un proxy
-body-silhouette sia contro le bounding box patologiche ufficiali NIH, insieme a un
-risultato di calibrazione emerso indipendentemente.
+seed dell'intervento motivato dall'explainability (isolando la modifica "Debiasing"
+menzionata sopra — CenterCrop — dagli altri cambi confusi insieme nella pipeline
+originale: loss function, training schedule, augmentation), validato sia contro un
+proxy body-silhouette sia contro le bounding box patologiche ufficiali NIH, insieme a
+un risultato di calibrazione emerso indipendentemente.
 
 ```
 paper_reproducibility/
@@ -245,6 +339,11 @@ paper_reproducibility/
     ├── test_predictions_<condizione>_seed<seed>.csv
     ├── localization_<condizione>_seed<seed>_FIXEDMASK.csv
     ├── bbox_localization_<condizione>_seed<seed>.csv
+    ├── figures/
+    │   └── fig7_reliability_diagram_CORRECTED_Effusion.png
+    ├── qc/
+    │   ├── mask_comparison/mask_old_vs_fixed.png
+    │   └── visual_qc/qc_grid_seed42.png
     └── patient_splits/
         ├── train_split.csv
         ├── val_split.csv
@@ -331,342 +430,3 @@ ospitati separatamente (es. Zenodo).
 
 Luca Migliaccio — tesi seguita da Antonio Esposito, Università degli Studi della
 Campania "Luigi Vanvitelli".
-
----
----
-
-# English version
-
-# Chest X-Ray Classification — Migliaccio Thesis
-
-## Description
-
-Automated chest X-ray classification project using deep learning models, developed
-as part of Luca Migliaccio's thesis, and later extended into a multi-condition
-methodological audit (localization, calibration, robustness) that fed into the paper
-*"Beyond a Single Comparison: A Multi-Condition Audit of Attribution Localization,
-Calibration, and Robustness in Multi-Label Chest X-Ray Classification"* (submitted
-to Computerized Medical Imaging and Graphics).
-
-The work includes training and comparing multiple architectures, interpretability
-techniques (Grad-CAM, Eigen-CAM), probability calibration, robustness analysis, and
-error analysis.
-
-**Datasets used (not included in this repository — see below):**
-- CheXpert
-- NIH ChestX-ray14 ("ChestXray14" / `archive/`), including the official subset of
-  984 pathology bounding boxes (`BBox_List_2017.csv`)
-
-**Architectures involved:**
-- DenseNet121, DenseNet169
-- ResNet50
-- EfficientNet B0 / B3 / B7
-- ConvNeXt
-- SwinV2
-- DINOv2, Rad-DINO
-- Ensemble models (combinations of the above)
-- Some models pretrained on biomedical datasets (XRV / biomedical weights, via
-  `torchxrayvision`)
-
-## Project structure
-
-```
-xRayProject/
-├── PythonCode/                    # original training/evaluation/analysis scripts
-│   ├── train_split.csv            # patient-level training split (70%)
-│   ├── val_split.csv              # patient-level validation split (15%)
-│   ├── test_split.csv             # patient-level test split (15%)
-│   └── ... (see table below)
-│
-├── archive/                       # NIH ChestX-ray14 dataset (images_001..images_012,
-│                                   #   Data_Entry_2017.csv, BBox_List_2017.csv)
-│                                   #   -- NOT included in this repository, see below
-├── archiveCheXpert/                # CheXpert dataset -- NOT included in this repository
-│
-├── checkpoints/                   # trained model weights and supporting files
-│                                   #   (optimized thresholds, error analyses, ensemble
-│                                   #   configs) -- NOT included in this repository
-│
-├── xrv_env/                       # Python virtual environment -- NOT included
-│
-└── paper_reproducibility/         # materials specific to the CMIG paper (see below)
-```
-
-All original scripts are located in `PythonCode/` (unmodified structure). Indicative
-map by functional category:
-
-| Category | File prefix | Examples |
-|---|---|---|
-| Data preparation/exploration | various | `dataset.py`, `datasetXRV.py`, `preprocessing.py`, `cleaning.py`, `split.py`, `DataLeakage.py`, `EsplorazioneCheXpert.py`, `PercentualiPatologie.py`, `CaricamentoPesiBiomedicali.py` |
-| Training | `train*.py` | `trainDensenet121.py`, `trainConvNeXt.py`, `trainConvNeXt-Debiasing.py`, `trainSwinV2-ChestXRay.py`, ... |
-| Evaluation | `eval*.py` | `evalDensenet121.py`, `evalConvNeXt.py`, `evalConvNeXt-Debiasing.py`, `evalEnsembleConvNeXtSwinV2.py`, ... |
-| Threshold optimization | `threshold*.py` | `thresholdResnet50.py`, `thresholdAdvancedDensenet121(2).py`, ... |
-| Error analysis | `erroranalysis*.py` | `erroranalysisDensenet121(2).py`, `erroranalysisEnsembleDensenet121Resnet50-xrv.py`, ... |
-| Calibration | `calibration*.py` | `calibrationConvNeXt.py`, `calibrationConvNeXt-Debiasing.py`, `calibration-robustnessConvNeXt-Debiasing.py` |
-| Interpretability | `grad-cam*.py`, `eigen-cam*.py` | `grad-camConvNeXt.py`, `grad-camConvNeXt-DebiasingFinale.py`, `eigen-camSwinV2.py`, `ActivationMaximationConvNeXt.py`, `DifferenceMapConvNeXt.py`, `GuidedActivationConvNeXt.py` |
-| Robustness | `robustness*.py` | `robustnessConvNeXt.py`, `robustnessConvNeXtDebiasing2.py` |
-| Summary charts | various | `GenerazioneGraficoRobustezza.py`, `GenerazioneIstogrammi.py` |
-| Exploratory/scratch scripts | `prova*.py` | `prova.py`, `prova1.py`, `provaEnsemble.py`, `analysisSwinV2.py` |
-
-## Data and files excluded from the repository
-
-This repository contains **code only**. Excluded (see `.gitignore`):
-- The datasets (`archive/`, `archiveCheXpert/`) — tens of GB
-- The Python virtual environment (`xrv_env/`)
-- Trained model checkpoints / weights
-- Generated analysis outputs (charts, Grad-CAM images, reports)
-
-Download the NIH ChestX-ray14 dataset separately and place it under `archive/`
-following the `images_001/` .. `images_012/` folder structure expected by all
-scripts. Likewise for CheXpert under `archiveCheXpert/`, where used.
-
-## Environment and software versions
-
-Python 3.12.3, tested with:
-
-```
-torch==2.12.0+cu130
-torchvision==0.27.0+cu130
-timm==1.0.27
-scikit-learn==1.8.0
-scipy==1.17.1
-pandas==3.0.3
-numpy==2.4.6
-scikit-image==0.26.0
-grad-cam
-```
-
-To recreate the environment:
-
-```bash
-python -m venv venv
-source venv/bin/activate
-pip install -r requirements.txt
-```
-
-If `requirements.txt` is not yet present in the folder, generate it from the machine
-with the `xrv_env` environment active:
-
-```bash
-source xrv_env/bin/activate
-pip freeze > requirements.txt
-```
-
-so that anyone cloning the repository can recreate the environment without the
-original venv.
-
-## How to use the scripts
-
-All scripts in `PythonCode/` follow the same pattern: **configuration via variables
-at the top of the file** (dataset path, checkpoint path, hyperparameters), not
-command-line arguments. Before running a script, open it and check/update the path
-variables at the top of the file (typically `ROOT_DIR`, `CHECKPOINT_DIR`,
-`TRAIN_CSV`/`VAL_CSV`/`TEST_CSV`), then run it directly:
-
-```bash
-cd PythonCode
-python <script_name>.py
-```
-
-Typical usage order, by phase:
-
-**1. Data preparation** (one-time, before everything else)
-```bash
-python split.py              # generates train_split.csv / val_split.csv / test_split.csv
-                              # at the patient level (70/15/15, fixed seed)
-python DataLeakage.py        # verifies no patient overlap across splits
-python PercentualiPatologie.py   # class-distribution statistics
-python EsplorazioneCheXpert.py   # CheXpert dataset exploration, if used
-python CaricamentoPesiBiomedicali.py   # downloads/verifies XRV pretrained weights
-```
-
-**2. Training** (one model per script; each script saves its own checkpoint to
-`checkpoints/`)
-```bash
-python trainConvNeXt.py              # ConvNeXt, pre-intervention configuration
-python trainConvNeXt-Debiasing.py    # ConvNeXt, post-intervention configuration
-python trainDensenet121.py           # DenseNet-121
-python trainSwinV2-ChestXRay.py      # SwinV2, radiology-pretrained weights
-# ... and the equivalent train*.py scripts for the other architectures listed above
-```
-
-**3. Evaluation and threshold optimization**
-```bash
-python evalConvNeXt.py                 # global metrics + Youden thresholds (pre-intervention)
-python evalConvNeXt-Debiasing.py       # same, post-intervention
-python evalDensenet121.py
-python evalEnsembleConvNeXtSwinV2.py   # ensemble metrics at inference time
-python thresholdResnet50.py            # threshold optimization for a single architecture
-python thresholdAdvancedDensenet121\(2\).py
-```
-
-**4. Error analysis**
-```bash
-python erroranalysisDensenet121\(2\).py
-python erroranalysisEnsembleDensenet121Resnet50-xrv.py
-```
-
-**5. Interpretability (Grad-CAM / Eigen-CAM)**
-```bash
-python grad-camConvNeXt.py                  # Grad-CAM maps, pre-intervention model
-python grad-camConvNeXt-DebiasingFinale.py  # visual reports on a 1,000-image sample,
-                                             #   post-intervention model
-python eigen-camSwinV2.py
-python ActivationMaximationConvNeXt.py      # activation-maximization visualization
-python DifferenceMapConvNeXt.py             # difference map between pre/post activations
-python GuidedActivationConvNeXt.py
-```
-
-**6. Calibration**
-```bash
-python calibrationConvNeXt.py                    # ECE, pre-intervention model
-python calibrationConvNeXt-Debiasing.py          # ECE, post-intervention model (10 uniform bins)
-python calibration-robustnessConvNeXt-Debiasing.py   # calibration under corruption
-```
-
-**7. Robustness**
-```bash
-python robustnessConvNeXt.py             # noise/blur, pre-intervention model
-python robustnessConvNeXtDebiasing2.py   # same, post-intervention model
-```
-
-**8. Summary charts**
-```bash
-python GenerazioneGraficoRobustezza.py
-python GenerazioneIstogrammi.py
-```
-
-Scripts prefixed `prova*.py` (`prova.py`, `prova1.py`, `provaEnsemble.py`,
-`analysisSwinV2.py`) are exploratory/scratch scripts used during development, not
-part of the final pipeline: consult them for reference, but they are not part of the
-standard reproduction path.
-
----
-
-## Reproducibility materials for the CMIG paper
-
-`paper_reproducibility/` contains everything needed to reproduce the paper's central
-methodological contribution: a controlled, seven-condition, three-seed ablation of
-the explainability-motivated intervention, validated against both a body-silhouette
-proxy and NIH's official pathology bounding boxes, alongside an independently
-surfaced calibration finding.
-
-```
-paper_reproducibility/
-├── requirements.txt
-├── ablation/
-│   └── ablation_train_and_eval.py
-├── localization_analysis/
-│   ├── quantitative_localization_debiasing.py
-│   ├── recompute_localization_fixed_mask.py
-│   ├── bbox_pointing_game_localization.py
-│   ├── analyze_ablation_results.py
-│   ├── analyze_bbox_results.py
-│   └── visual_qc_c0_vs_c6.py
-├── calibration_analysis/
-│   ├── full_calibration_reanalysis.py
-│   ├── diagnose_ece_discrepancy.py
-│   ├── recompute_table7_per_class_ece.py
-│   └── regenerate_reliability_diagram.py
-├── inventory_checkpoints.py
-├── build_final_checkpoint_manifest.py
-└── results/
-    ├── SUMMARY_global_metrics.csv
-    ├── SUMMARY_localization_vs_baseline.csv
-    ├── SUMMARY_bbox_localization.csv
-    ├── SUMMARY_bbox_statistical_analysis.csv
-    ├── SUMMARY_calibration_full.csv
-    ├── SUMMARY_calibration_per_class.csv
-    ├── table7_corrected.csv
-    ├── checkpoint_inventory_FULL.csv
-    ├── checkpoint_hashes.csv
-    ├── diagnostic_original_checkpoint_predictions.csv
-    ├── test_predictions_<condition>_seed<seed>.csv
-    ├── localization_<condition>_seed<seed>_FIXEDMASK.csv
-    ├── bbox_localization_<condition>_seed<seed>.csv
-    └── patient_splits/
-        ├── train_split.csv
-        ├── val_split.csv
-        └── test_split.csv
-```
-
-### Reproduction sequence
-
-```bash
-cd paper_reproducibility
-
-# 1. Train and evaluate all 7 ablation conditions x 3 seeds (Tables 4-5)
-#    -- the expensive step (hours to days); can be run condition by condition
-python ablation/ablation_train_and_eval.py --conditions C0_baseline
-python ablation/ablation_train_and_eval.py --conditions C1_crop_only
-# ... repeat for C2_bce_only, C3_schedule_only, C4_noaug_only, C5_crop_bce, C6_full_combined
-
-# 2. Statistical analysis of the localization ablation (Table 5):
-#    patient-only and hierarchical (seed-then-patient) bootstrap
-python localization_analysis/analyze_ablation_results.py
-
-# 3. Correct the body-silhouette mask's shoulder-exclusion artifact
-#    (found via visual audit -- see visual_qc_c0_vs_c6.py) and recompute
-python localization_analysis/recompute_localization_fixed_mask.py
-
-# 4. Ground-truth bounding-box validation (Table 6) -- inference only, no training
-python localization_analysis/bbox_pointing_game_localization.py
-python localization_analysis/analyze_bbox_results.py
-
-# 5. Calibration reanalysis across all ablation conditions (Table 8)
-#    -- pure reanalysis of already-saved CSVs, no new inference
-python calibration_analysis/full_calibration_reanalysis.py
-
-# 6. ECE discrepancy diagnosis and Table 7 / Figure 7 correction
-python calibration_analysis/diagnose_ece_discrepancy.py
-python calibration_analysis/recompute_table7_per_class_ece.py
-python calibration_analysis/regenerate_reliability_diagram.py
-
-# 7. Checkpoint manifest (full inventory + curated whitelist with hashes)
-python inventory_checkpoints.py
-python build_final_checkpoint_manifest.py
-```
-
-Each script's docstring documents its inputs, outputs, expected runtime, and any
-methodological caveats (preprocessing choices, statistical assumptions). Read it
-before running the script.
-
-### What each analysis established
-
-- **Body-silhouette localization (Table 5)**: a single, uncontrolled before/after
-  comparison of the intervention initially suggested a strong improvement
-  ($p=1.4\times10^{-28}$). Once corrected for a shoulder-exclusion mask artifact and
-  evaluated with a hierarchical (seed-then-patient) bootstrap across 3 seeds, no
-  condition's effect is distinguishable from training noise.
-- **Ground-truth bounding-box localization (Table 6)**: restricted to the 131 unique
-  test-split images with official NIH annotations (after fixing an initial
-  train/test contamination bug), pointing-game accuracy shows no statistically
-  robust improvement; a small decrease in activation mass inside the true lesion box
-  is the only interval excluding zero, an exploratory, uncorrected-for-multiplicity
-  result.
-- **Calibration (Tables 7-8)**: Asymmetric Loss is associated with roughly 29-fold
-  higher Expected Calibration Error than binary cross-entropy, concordant across
-  ECE, Brier score, and negative log-likelihood. An initial discrepancy between this
-  ablation-internal pattern and a separately-computed single-instance estimate
-  (0.1015 vs. ~0.01) was traced, via `diagnose_ece_discrepancy.py`, to an earlier,
-  superseded evaluation pipeline rather than to the model itself.
-
-### Checkpoints
-
-`paper_reproducibility/results/checkpoint_hashes.csv` lists SHA-256 hashes for every
-checkpoint referenced in the paper (26 available: 21 ablation checkpoints + 5
-single-backbone/reference checkpoints for Tables 4/7-8, plus 2 explicitly documented
-as unavailable). Two Table 4 configurations (ResNet-50 and DenseNet-121, both on
-plain ImageNet pretraining) were trained locally by the student before migrating the
-project to the GPU server used for everything else in this repository; their
-checkpoints were never uploaded and are not recoverable. Only the metrics already
-reported in the paper are verifiable for those two rows, not the underlying model
-weights.
-
-Trained model checkpoints themselves are not tracked in git (see `.gitignore`); host
-them separately (e.g., Zenodo).
-
-## Author
-
-Luca Migliaccio — thesis supervised by Antonio Esposito, Università degli Studi
-della Campania "Luigi Vanvitelli".
