@@ -1,0 +1,24 @@
+# Servizio systemd: esegue la coda in continuo e la fa ripartire dopo un riavvio/spegnimento.
+# Installazione (una volta):
+#   sudo cp deploy/xray-queue.service /etc/systemd/system/
+#   sudo systemctl daemon-reload && sudo systemctl enable --now xray-queue
+# Log:  journalctl -u xray-queue -f      (oppure tail -f <work_dir>/queue.log)
+# Stop: sudo systemctl stop xray-queue   (il run in corso riprendera' dall'ultima epoca completata)
+[Unit]
+Description=xray v2 - coda esperimenti (paper versione A)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=gpuvm
+WorkingDirectory=/home/gpuvm/xray_v2
+Environment=PYTHONUNBUFFERED=1
+Environment=XRAY_CONFIG=/home/gpuvm/xray_v2/config.yaml
+ExecStart="/home/gpuvm/Desktop/Luca Migliaccio/xrv_env/bin/python" /home/gpuvm/xray_v2/run_queue.py
+Restart=on-failure
+RestartSec=300
+Nice=5
+
+[Install]
+WantedBy=multi-user.target

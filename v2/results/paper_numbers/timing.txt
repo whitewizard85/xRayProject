@@ -1,0 +1,5 @@
+ore di training totali: 171.4
+               count         sum      mean
+arch                                      
+convnext_base     90  163.530395  1.817004
+densenet121       10    7.864306  0.786431

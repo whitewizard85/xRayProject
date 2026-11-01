@@ -1,0 +1,11 @@
+# The repository root ignores *.csv and *.png; inside v2/ we keep aggregated results and figures.
+!*.csv
+!*.png
+
+# VinDr-CXR data must never be committed (non-commercial licence, no redistribution).
+*.dicom
+*.dcm
+*.npz
+vindr_*.csv
+train.csv
+cache/

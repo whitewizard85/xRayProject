@@ -1,0 +1,82 @@
+# =====================================================================
+# Configurazione unica della pipeline v2 (paper "versione A").
+# Modifica SOLO questo file per adattare i percorsi al server.
+# =====================================================================
+
+paths:
+  # Cartella di lavoro: cache immagini, checkpoint, predizioni, analisi.
+  # Serve spazio: ~20 GB cache NIH + ~2 GB cache VinDr + ~35 GB checkpoint (100 run x ~350 MB).
+  work_dir: /home/gpuvm/xray_v2_work
+
+  # NIH ChestX-ray14 (struttura Kaggle: images_001/images/*.png, Data_Entry_2017.csv, BBox_List_2017.csv).
+  # Se esiste gia' (come sul server attuale) il download viene saltato.
+  nih_dir: "/home/gpuvm/Desktop/Luca Migliaccio/archive"
+
+  # Split paziente-level ESISTENTI del paper (train/val/test_split.csv): li riusiamo identici.
+  splits_dir: "/home/gpuvm/Desktop/Luca Migliaccio/PythonCode"
+
+  # Sorgente VinDr-CXR per la valutazione esterna:
+  #   "kaggle"    -> competizione VinBigData (gratuita, basta un account Kaggle e accettare le regole):
+  #                  15.000 immagini annotate INDIPENDENTEMENTE da 3 radiologi (split "train" della release).
+  #   "physionet" -> test set ufficiale (3.000 immagini, consenso di 5 radiologi): richiede credentialing.
+  vindr_source: kaggle
+  # Radice VinDr-CXR da PhysioNet (dopo il download: <vindr_root>/vindr-cxr/1.0.0/...)
+  vindr_root: /home/gpuvm/datasets
+  # Cartella della competizione Kaggle estratta (deve contenere train.csv e train/*.dicom)
+  vindr_kaggle_dir: /home/gpuvm/datasets/vinbigdata
+
+data:
+  cache_size: 512          # lato delle immagini pre-ridimensionate in cache (PNG 8 bit, grayscale)
+  kaggle_label_rule: majority   # immagine positiva per una classe se la segnano >=2 radiologi su 3 ("any" = almeno 1)
+  vindr_geometry: resize   # "resize" (come NIH: resize diretto a quadrato) oppure "pad" (letterbox a quadrato)
+  prep_workers: 12         # processi per la creazione della cache
+
+train:
+  image_size: 384
+  crop_resize: 420         # per le condizioni con crop: resize 420 -> center crop 384 (come nel paper)
+  batch_size: 16           # invariato rispetto al paper
+  lr: 3.0e-5               # invariato
+  weight_decay: 0.01       # invariato (default AdamW)
+  fixed_epochs: 10         # schedule "fx10": 10 epoche + cosine annealing
+  max_epochs_cap: 20       # schedule "es20": fino a 20 epoche, early stopping
+  patience: 8
+  num_workers: 8
+  amp: bf16                # "bf16" (consigliato su RTX 5000 Ada), "fp16" oppure "none"
+  channels_last: true
+  keep_resume_checkpoint: false   # se false, last.pt viene cancellato a run completato (risparmia spazio)
+  model_override: null     # lasciare null (solo per test: forza un altro modello timm per tutti i run)
+  pretrained: true
+
+experiment:
+  seeds: [42, 123, 2026, 7, 314]  # 5 seed; i primi 3 coincidono con quelli del paper
+  blocks: [factorial, losses, arch]  # quali blocchi eseguire (vedi experiments.py)
+
+attribution:
+  methods: [gradcam, gradcampp, ig]
+  smooth_sigma_px: 4.0     # smoothing gaussiano delle mappe (in pixel di input) prima delle metriche
+  ig_steps: 32
+  ig_batch: 16
+  ig_max_pairs: 600        # IG e' costoso: sottoinsieme FISSO (uguale per tutti i run) di coppie immagine-classe
+  cam_batch: 16
+  faithfulness_pairs: 300  # deletion test su sottoinsieme fisso
+  faithfulness_fracs: [0.0, 0.02, 0.05, 0.1, 0.2, 0.3, 0.5, 0.75, 1.0]
+  sanity_pairs: 100        # model-randomization test (Adebayo et al.) su sottoinsieme fisso
+  map_grid: 64             # risoluzione delle mappe salvate per l'analisi di accordo tra run
+  max_pairs_per_dataset: 3000  # tetto alle coppie immagine-target per dataset (sottoinsieme FISSO, uguale per tutti i run)
+  subset_seed: 0
+
+analysis:
+  n_boot: 2000
+  ci: 0.95
+
+# --- SOLO per test rapidi: sovrascritto da --smoke -------------------------
+smoke:
+  work_subdir: smoke
+  n_train: 512
+  n_val: 256
+  n_test: 256
+  n_vindr: 64
+  epochs: 1
+  seeds: [42]
+  model_override: null     # es. "convnext_atto" per test su CPU; null = modelli veri
+  pretrained: true

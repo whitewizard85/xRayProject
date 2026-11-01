@@ -1,0 +1,23 @@
+run trovati: 100
+
+== schedule es20 (n=40) ==
+distribuzione best_epoch:
+best_epoch
+2    31
+3     9
+mediana 2.0, min 2, max 3
+calo medio val AUC (best - ultima epoca): 0.0706
+
+== schedule fx10 (n=60) ==
+distribuzione best_epoch:
+best_epoch
+2    35
+3    16
+4     6
+5     3
+mediana 2.0, min 2, max 5
+calo medio val AUC (best - ultima epoca): 0.0473
+
+coppie fx10/es20 con lo stesso seed: 40
+  stessa best_epoch: 35
+  |diff best_epoch| mediana: 0.0
