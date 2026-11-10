@@ -11,6 +11,7 @@
 - train_done.json = storia delle epoche + tempi; marca il run come completato.
 """
 import os
+import math
 import time
 import argparse
 
@@ -66,7 +67,11 @@ def main():
     pos = tr_ds.labels.sum(0)
     pos_weight = torch.tensor((len(tr_ds) - pos) / np.maximum(pos, 1), dtype=torch.float32, device=device)
     criterion = build_loss(run["loss"], pos_weight=pos_weight)
-    opt = torch.optim.AdamW(model.parameters(), lr=tc["lr"], weight_decay=tc["weight_decay"])
+    if run["schedule"] == "wc15":
+        rg = tc["regime"]
+        opt = torch.optim.AdamW(model.parameters(), lr=rg["lr"], weight_decay=rg["weight_decay"])
+    else:
+        opt = torch.optim.AdamW(model.parameters(), lr=tc["lr"], weight_decay=tc["weight_decay"])
 
     if run["schedule"] == "fx10":
         epochs, patience = tc["fixed_epochs"], None
@@ -74,6 +79,18 @@ def main():
     elif run["schedule"] == "es20":
         epochs, patience = tc["max_epochs_cap"], tc["patience"]
         sched = None
+    elif run["schedule"] == "wc15":
+        # warmup lineare (per epoca) + cosine fino a 0; nessun early stopping: la selezione resta
+        # "miglior AUC di validazione", cosi' si osserva DOVE cade il picco con questo regime.
+        epochs, patience = (tc["fixed_epochs"] if cfg["_smoke"] else rg["epochs"]), None
+        wu = 0 if cfg["_smoke"] else rg["warmup_epochs"]
+
+        def lr_lambda(e):          # e = numero di sched.step() gia' eseguiti (0 = prima epoca)
+            if e < wu:
+                return (e + 1) / (wu + 1)
+            t = (e - wu) / max(1, epochs - wu)
+            return 0.5 * (1 + math.cos(math.pi * min(t, 1.0)))
+        sched = torch.optim.lr_scheduler.LambdaLR(opt, lr_lambda)
     else:
         raise ValueError(run["schedule"])
     scaler = torch.amp.GradScaler("cuda", enabled=(device.type == "cuda" and tc["amp"] == "fp16"))
