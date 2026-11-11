@@ -181,11 +181,13 @@ def main():
                 for b, i in enumerate(idx):
                     for meth, v in mp.items():
                         o, r = orig[i][meth], to_grid_flat(v[b], G)
-                        ok = np.isfinite(o).all() and np.isfinite(r).all() and o.std() > 0 and r.std() > 0
+                        finite = bool(np.isfinite(o).all() and np.isfinite(r).all())
+                        const = bool(finite and r.std() == 0)
+                        ok = finite and o.std() > 0 and r.std() > 0
                         rho = spearmanr(o, r).statistic if ok else np.nan
                         crow.append(dict(run_id=run["run_id"], pair_id=pairs[i]["pair_id"], method=meth,
                                          level=li + 1, level_name=lname, n_levels=len(levels),
-                                         spearman=float(rho), constant_map=bool(r.std() == 0)))
+                                         spearman=float(rho), constant_map=const, nonfinite_map=not finite))
             rext.remove()
 
     pd.DataFrame(rows).to_csv(os.path.join(rd, "attr_ext_igblur_pairs.csv"), index=False)

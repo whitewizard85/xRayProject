@@ -366,14 +366,25 @@ def cascade_levels(model):
 
 @torch.no_grad()
 def reinit_modules(modules, seed=0):
-    """Re-inizializzazione uniforme per tutte le architetture: pesi >=2D ~ N(0, 0.02) troncata,
-    pesi di normalizzazione = 1, bias = 0, altri parametri 1D ~ N(0, 0.02).
-    (Non dipende da reset_parameters, che non copre ad es. le tabelle di bias posizionale di Swin.)"""
+    """Re-inizializzazione uniforme per tutte le architetture (randomizzazione a cascata):
+      - pesi convoluzionali (4D): He/Kaiming normale, std = sqrt(2 / fan_in) (scala del segnale preservata);
+      - altri pesi >= 2D (lineari, tabelle di bias posizionale): N(0, 0.02) troncata a +-2 sigma;
+      - pesi di normalizzazione = 1, bias = 0, altri parametri 1D (es. layer scale) ~ N(0, 0.02);
+      - BatchNorm: statistiche di popolazione azzerate (media 0, varianza 1), come in un modello appena creato.
+    Senza l'ultimo punto, in eval i BatchNorm userebbero le statistiche del modello addestrato su attivazioni
+    ormai diverse e il segnale puo' divergere (mappe non finite), come osservato su DenseNet."""
     g = torch.Generator().manual_seed(seed)
     for m in modules:
+        for sub in m.modules():
+            if isinstance(sub, nn.modules.batchnorm._BatchNorm) and sub.track_running_stats:
+                sub.reset_running_stats()
         for name, p in m.named_parameters():
             leaf = name.split(".")[-1]
-            if p.ndim >= 2:
+            if p.ndim == 4:
+                fan_in = p.shape[1] * p.shape[2] * p.shape[3]
+                v = torch.randn(p.shape, generator=g) * math.sqrt(2.0 / max(fan_in, 1))
+                p.copy_(v.to(p.dtype))
+            elif p.ndim >= 2:
                 v = torch.randn(p.shape, generator=g).clamp_(-2, 2) * 0.02
                 p.copy_(v.to(p.dtype))
             elif leaf == "bias":

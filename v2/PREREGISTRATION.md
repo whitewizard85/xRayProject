@@ -31,8 +31,9 @@ Grad-CAM/Grad-CAM++ for Swin-B use the output of the last hierarchical stage.
 **Extended attribution** (all 50 reference-cell models: ConvNeXt-Base BCE/ASL, wBCE, focal; DenseNet-121
 BCE/ASL; Swin-B BCE/ASL; regime BCE/ASL; five seeds each):
 - *Full cascading randomization* (Adebayo et al., 2018): layers re-initialized cumulatively from the top
-  (head, last stage, …, stem), with the same re-initialization for every architecture (truncated normal
-  σ = 0.02 for weights, ones/zeros for normalization parameters). After each level, the Spearman correlation
+  (head, last stage, …, stem), with the same re-initialization rule for every architecture (He-normal for convolutional
+  kernels, truncated normal σ = 0.02 for other weight matrices, ones/zeros for normalization parameters,
+  BatchNorm population statistics reset to mean 0 and variance 1). After each level, the Spearman correlation
   between original and randomized maps is computed on the 92 external pairs of the original randomization subset.
 - *Second IG baseline*: a Gaussian-blurred copy of the image (σ = 16 px), computed on the original IG subset
   (600 pairs; localization), deletion subset (300 pairs; faithfulness) and randomization subset.
