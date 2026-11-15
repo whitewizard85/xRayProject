@@ -46,3 +46,23 @@ Hardware used: one NVIDIA RTX 5000 Ada; 171 GPU-hours of training for the 100 ru
 - NIH ChestX-ray14: public (NIH Clinical Center).
 - VinDr-CXR: obtained from the original sources (PhysioNet or the Kaggle VinBigData competition) under their
   non-commercial research terms. **It is not redistributed here.** `check_no_vindr.sh` blocks accidental commits.
+
+## Extension (November 2026) — see `PREREGISTRATION.md`
+New blocks and analyses, all resumable through the same queue:
+
+| What | Where | Cost (RTX 5000 Ada, estimate) |
+|---|---|---|
+| Swin-B at the reference cell, BCE/ASL × 5 seeds (block `swin`) | `experiments.py`, `common.py` | ~25 GPU-h training |
+| ConvNeXt-Base, alternative regime (lr 1e-5, wd 0.05, warm-up + cosine 15 epochs, strong augmentation), BCE/ASL × 5 seeds (block `regime`) | `experiments.py`, `03_train.py` | ~30 GPU-h training |
+| Full cascading randomization + IG with blurred baseline on the 50 reference-cell models (stage `attrx`) | `05b_attribution_ext.py` | ~15–25 min per model |
+| Demographics (NIH partitions; VinDr from DICOM headers streamed from the Kaggle zip) | `09_demographics.py` | no GPU; ~4 GB of traffic for VinDr |
+| Analysis of the extension (pre-specified H1–H5 + descriptive tables) | `08_extension_analysis.py` | seconds |
+
+```bash
+cd pipeline
+python 09_demographics.py --skip-vindr      # NIH only, immediate
+python 09_demographics.py                   # also VinDr (needs the Kaggle token, resumable)
+python run_queue.py --stages attrx          # extended attribution on the 30 existing reference models (no training)
+python run_queue.py                         # trains/evaluates/attributes the 20 new runs, then attrx on them
+python 08_extension_analysis.py             # -> <work_dir>/analysis_ext/EXT_REPORT.md
+```

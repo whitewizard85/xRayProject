@@ -207,11 +207,21 @@ IMAGENET_STD = [0.229, 0.224, 0.225]
 
 
 def build_transforms(tcfg, crop, aug):
+    """aug: 0 = nessuna, 1 = flip orizzontale, 2 = augmentation "forte" (regime alternativo):
+    flip + piccola trasformazione affine + variazioni di luminosita'/contrasto."""
     from torchvision import transforms as T
     S, R = tcfg["image_size"], tcfg["crop_resize"]
     base = [T.Resize((R, R)), T.CenterCrop((S, S))] if crop else [T.Resize((S, S))]
     norm = [T.ToTensor(), T.Normalize(IMAGENET_MEAN, IMAGENET_STD)]
-    train = list(base) + ([T.RandomHorizontalFlip(p=0.5)] if aug else []) + norm
+    if aug == 2:
+        extra = [T.RandomHorizontalFlip(p=0.5),
+                 T.RandomAffine(degrees=7, translate=(0.04, 0.04), scale=(0.93, 1.07)),
+                 T.ColorJitter(brightness=0.15, contrast=0.15)]
+    elif aug:
+        extra = [T.RandomHorizontalFlip(p=0.5)]
+    else:
+        extra = []
+    train = list(base) + extra + norm
     return T.Compose(train), T.Compose(list(base) + norm)
 
 
@@ -277,7 +287,9 @@ def to_common_grid(maps, tcfg, crop, grid):
 # ---------------------------------------------------------------------
 # Modelli
 # ---------------------------------------------------------------------
-TIMM_NAMES = {"convnext_base": "convnext_base.fb_in22k", "densenet121": "densenet121.tv_in1k"}
+TIMM_NAMES = {"convnext_base": "convnext_base.fb_in22k", "densenet121": "densenet121.tv_in1k",
+              # estensione: transformer gerarchico pre-addestrato su ImageNet-22k a 384 px (come ConvNeXt-Base IN-22k)
+              "swin_base": "swin_base_patch4_window12_384.ms_in22k"}
 
 
 def build_model(arch, pretrained=True, override=None):
@@ -286,8 +298,19 @@ def build_model(arch, pretrained=True, override=None):
     return timm.create_model(name, pretrained=pretrained, num_classes=NUM_CLASSES)
 
 
+def is_swin(model):
+    return hasattr(model, "layers") and hasattr(model, "patch_embed")
+
+
+def feature_layout(model):
+    """Layout dell'output del target layer: Swin (timm) produce mappe (B, H, W, C)."""
+    return "nhwc" if is_swin(model) else "nchw"
+
+
 def target_layer(model):
-    """Ultimo blocco convoluzionale (output NCHW) per Grad-CAM."""
+    """Ultimo stadio (mappa spaziale) per Grad-CAM. Per Swin l'output e' NHWC (vedi feature_layout)."""
+    if is_swin(model):                      # Swin Transformer (timm): ultimo stadio gerarchico
+        return model.layers[-1]
     if hasattr(model, "stages"):            # ConvNeXt (timm)
         return model.stages[-1]
     if hasattr(model, "features"):          # DenseNet (timm): features termina con norm5 (BN+ReLU)
@@ -298,7 +321,9 @@ def target_layer(model):
 def last_block_and_head(model):
     """Moduli da re-inizializzare nel test di randomizzazione (cascata dall'alto, primo livello)."""
     mods = []
-    if hasattr(model, "stages"):
+    if is_swin(model):
+        mods.append(model.layers[-1])
+    elif hasattr(model, "stages"):
         mods.append(model.stages[-1])
     elif hasattr(model, "features"):
         blk = getattr(model.features, "denseblock4", None)
@@ -306,6 +331,68 @@ def last_block_and_head(model):
     head = model.get_classifier()
     mods.append(head)
     return mods
+
+
+def cascade_levels(model):
+    """Livelli per la randomizzazione A CASCATA (Adebayo et al., 2018), dall'alto verso il basso.
+    Ogni elemento: (nome, [moduli]). La randomizzazione e' cumulativa: al livello k sono
+    re-inizializzati tutti i livelli 0..k."""
+    head = model.get_classifier()
+    if is_swin(model):
+        lv = [("head", [head, getattr(model, "norm", head)])]
+        n = len(model.layers)
+        lv += [(f"layers.{i}", [model.layers[i]]) for i in range(n - 1, -1, -1)]
+        lv += [("patch_embed", [model.patch_embed])]
+        return lv
+    if hasattr(model, "stages"):            # ConvNeXt
+        lv = [("head", [model.head])]
+        n = len(model.stages)
+        lv += [(f"stages.{i}", [model.stages[i]]) for i in range(n - 1, -1, -1)]
+        lv += [("stem", [model.stem])]
+        return lv
+    if hasattr(model, "features"):          # DenseNet (timm/torchvision naming)
+        f = model.features
+        lv = [("classifier", [head] + ([f.norm5] if hasattr(f, "norm5") else []))]
+        for k in [4, 3, 2, 1]:
+            lv.append((f"denseblock{k}", [getattr(f, f"denseblock{k}")]))
+            if k > 1 and hasattr(f, f"transition{k - 1}"):
+                lv.append((f"transition{k - 1}", [getattr(f, f"transition{k - 1}")]))
+        stem = [getattr(f, n) for n in ("conv0", "norm0") if hasattr(f, n)]
+        if stem:
+            lv.append(("stem", stem))
+        return lv
+    raise ValueError("livelli di cascata non definiti per questo modello")
+
+
+@torch.no_grad()
+def reinit_modules(modules, seed=0):
+    """Re-inizializzazione uniforme per tutte le architetture (randomizzazione a cascata):
+      - pesi convoluzionali (4D): He/Kaiming normale, std = sqrt(2 / fan_in) (scala del segnale preservata);
+      - altri pesi >= 2D (lineari, tabelle di bias posizionale): N(0, 0.02) troncata a +-2 sigma;
+      - pesi di normalizzazione = 1, bias = 0, altri parametri 1D (es. layer scale) ~ N(0, 0.02);
+      - BatchNorm: statistiche di popolazione azzerate (media 0, varianza 1), come in un modello appena creato.
+    Senza l'ultimo punto, in eval i BatchNorm userebbero le statistiche del modello addestrato su attivazioni
+    ormai diverse e il segnale puo' divergere (mappe non finite), come osservato su DenseNet."""
+    g = torch.Generator().manual_seed(seed)
+    for m in modules:
+        for sub in m.modules():
+            if isinstance(sub, nn.modules.batchnorm._BatchNorm) and sub.track_running_stats:
+                sub.reset_running_stats()
+        for name, p in m.named_parameters():
+            leaf = name.split(".")[-1]
+            if p.ndim == 4:
+                fan_in = p.shape[1] * p.shape[2] * p.shape[3]
+                v = torch.randn(p.shape, generator=g) * math.sqrt(2.0 / max(fan_in, 1))
+                p.copy_(v.to(p.dtype))
+            elif p.ndim >= 2:
+                v = torch.randn(p.shape, generator=g).clamp_(-2, 2) * 0.02
+                p.copy_(v.to(p.dtype))
+            elif leaf == "bias":
+                p.zero_()
+            elif leaf == "weight":
+                p.fill_(1.0)
+            else:
+                p.copy_((torch.randn(p.shape, generator=g) * 0.02).to(p.dtype))
 
 
 def randomize_modules(model, modules, seed=0):

@@ -46,10 +46,19 @@ train:
   keep_resume_checkpoint: false   # se false, last.pt viene cancellato a run completato (risparmia spazio)
   model_override: null     # lasciare null (solo per test: forza un altro modello timm per tutti i run)
   pretrained: true
+  # Regime alternativo (blocco "regime", schedule "wc15"): learning rate piu' basso, weight decay piu'
+  # alto, warmup + cosine su 15 epoche, augmentation forte (aug=2). Pre-specificato in PREREGISTRATION.md.
+  regime:
+    lr: 1.0e-5
+    weight_decay: 0.05
+    epochs: 15
+    warmup_epochs: 1
 
 experiment:
   seeds: [42, 123, 2026, 7, 314]  # 5 seed; i primi 3 coincidono con quelli del paper
-  blocks: [factorial, losses, arch]  # quali blocchi eseguire (vedi experiments.py)
+  # Blocchi del piano (vedi experiments.py). Estensione 2026-11: aggiungere "swin" e "regime".
+  # I run gia' completati vengono saltati automaticamente.
+  blocks: [factorial, losses, arch, swin, regime]
 
 attribution:
   methods: [gradcam, gradcampp, ig]
@@ -64,6 +73,16 @@ attribution:
   map_grid: 64             # risoluzione delle mappe salvate per l'analisi di accordo tra run
   max_pairs_per_dataset: 3000  # tetto alle coppie immagine-target per dataset (sottoinsieme FISSO, uguale per tutti i run)
   subset_seed: 0
+
+# Attribuzione estesa (05b_attribution_ext.py): randomizzazione a cascata completa e IG con baseline sfocata.
+attribution_ext:
+  runs: reference         # "reference" = run della cella di riferimento di tutti i blocchi (50 run); "all" = tutti
+  ig_baselines: [black, blur]   # "black" = come nel paper; "blur" = copia sfocata dell'immagine (sigma 16 px)
+  blur_sigma_px: 16.0
+  cascade_pairs: 100      # stesso sottoinsieme fisso del sanity check originale
+  ig_pairs: 600           # stesso sottoinsieme fisso di IG del paper
+  faithfulness_pairs: 300
+  reinit_seed: 0
 
 analysis:
   n_boot: 2000

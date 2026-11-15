@@ -37,7 +37,7 @@ from tqdm import tqdm
 from torchvision.transforms.functional import gaussian_blur
 
 from common import (load_config, run_dir, shared_data_dir, build_transforms, get_device, load_model_for_run,
-                    target_layer, last_block_and_head, randomize_modules, box_cache_to_input, boxes_to_mask,
+                    target_layer, feature_layout, last_block_and_head, randomize_modules, box_cache_to_input, boxes_to_mask,
                     to_common_grid, CIDX, VINDR_TARGETS, IMAGENET_MEAN, IMAGENET_STD, dump_json)
 from experiments import find_run
 
@@ -87,8 +87,9 @@ def build_pairs(cfg):
 
 # ---------------------------------------------------------------------
 class CamExtractor:
-    def __init__(self, model, layer):
+    def __init__(self, model, layer, layout="nchw"):
         self.model, self.acts, self.grads, self.enabled = model, None, None, True
+        self.layout = layout                     # "nhwc" per Swin (timm)
         self.h = layer.register_forward_hook(self._fh)
 
     def _fh(self, m, i, o):
@@ -107,6 +108,8 @@ class CamExtractor:
         score = torch.stack([out[b, idx].sum() for b, idx in enumerate(idx_lists)])
         score.sum().backward()
         A, G = self.acts.detach().float(), self.grads.detach().float()
+        if self.layout == "nhwc":
+            A, G = A.permute(0, 3, 1, 2), G.permute(0, 3, 1, 2)
         gc = F.relu((G.mean((2, 3), keepdim=True) * A).sum(1))
         g2, g3 = G ** 2, G ** 3
         s = A.sum((2, 3), keepdim=True)
@@ -224,7 +227,7 @@ def main():
         print("[WARN] nessuna coppia con box disponibile")
     print(f"[INFO] coppie: {len(pairs)} (IG su {sum(p['in_ig'] for p in pairs)}, "
           f"faithfulness su {sum(p['in_faith'] for p in pairs)}, sanity su {sum(p['in_sanity'] for p in pairs)})")
-    ext = CamExtractor(model, target_layer(model))
+    ext = CamExtractor(model, target_layer(model), feature_layout(model))
     grid = {m: np.full((len(pairs), G, G), np.nan, dtype=np.float16) for m in a["methods"]}
     rows, frows = [], []
     rng = np.random.default_rng(12345)
@@ -267,7 +270,7 @@ def main():
         ext.remove()
         rmodel = copy.deepcopy(model)
         randomize_modules(rmodel, last_block_and_head(rmodel), seed=0)
-        rext = CamExtractor(rmodel, target_layer(rmodel))
+        rext = CamExtractor(rmodel, target_layer(rmodel), feature_layout(rmodel))
         keys = sorted(sanity_maps)
         for s in range(0, len(keys), a["cam_batch"]):
             ks = keys[s:s + a["cam_batch"]]
