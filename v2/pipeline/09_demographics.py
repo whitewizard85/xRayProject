@@ -55,7 +55,12 @@ def summarize(df, label, age_col="age", sex_col="sex", per="image"):
 
 # ------------------------------- NIH ---------------------------------
 def nih_demographics(cfg):
-    meta = pd.read_csv(os.path.join(cfg["paths"]["nih_dir"], "Data_Entry_2017.csv"))
+    src = os.path.join(cfg["paths"]["nih_dir"], "Data_Entry_2017.csv")
+    if os.path.exists(src):
+        meta = pd.read_csv(src)
+    else:   # i file di split contengono le stesse colonne di Data_Entry_2017.csv
+        meta = pd.concat([pd.read_csv(os.path.join(cfg["paths"]["splits_dir"], f"{s}_split.csv"))
+                          for s in ["train", "val", "test"]], ignore_index=True)
     meta = meta.rename(columns={"Image Index": "image_id", "Patient ID": "pid", "Patient Age": "age_raw",
                                 "Patient Gender": "sex", "View Position": "view"})
     meta["age"] = pd.to_numeric(meta["age_raw"], errors="coerce")
@@ -91,7 +96,10 @@ def parse_age(s):
     if not m:
         return np.nan
     v, u = float(m.group(1)), m.group(2) or "Y"
-    return v if u == "Y" else v / 12 if u == "M" else v / 52.1775 if u == "W" else v / 365.25
+    if v == 0:                      # 000Y / 000D: segnaposto della release, non eta' reali
+        return np.nan
+    a = v if u == "Y" else v / 12 if u == "M" else v / 52.1775 if u == "W" else v / 365.25
+    return a if a <= 100 else np.nan  # come per NIH: > 100 anni trattato come mancante
 
 
 def vindr_tags(cfg, threads):

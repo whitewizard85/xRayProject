@@ -94,9 +94,13 @@ def main():
         progressed, pending = False, 0
         for i, run in enumerate(plan):
             rd = run_dir(cfg, run["run_id"])
-            for stage, script, marker in STAGES:
+            for si, (stage, script, marker) in enumerate(STAGES):
                 if stage not in wanted or os.path.exists(os.path.join(rd, marker)):
                     continue
+                # prerequisiti non soddisfatti e non richiesti in questa coda (es. --stages attrx su run non
+                # ancora addestrati): salta senza consumare tentativi
+                if any(not os.path.exists(os.path.join(rd, m)) for st, _, m in STAGES[:si] if st not in wanted):
+                    break
                 key = f"{run['run_id']}:{stage}"
                 if attempts.get(key, 0) >= args.max_attempts:
                     break   # stadio rinunciato: non eseguire i successivi di questo run
